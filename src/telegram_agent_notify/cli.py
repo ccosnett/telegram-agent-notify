@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
 import os
 import pty
 import re
@@ -9,6 +10,7 @@ import shlex
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import termios
@@ -223,16 +225,26 @@ def interactive_ready_mode(args: argparse.Namespace) -> int:
     def sync_winsize() -> None:
         try:
             size = shutil.get_terminal_size()
-            packed = termios.tcgetwinsize(stdout_fd)
-            rows = packed[0] if packed[0] else size.lines
-            cols = packed[1] if packed[1] else size.columns
+            if hasattr(termios, "tcgetwinsize"):
+                packed = termios.tcgetwinsize(stdout_fd)
+                rows = packed[0] if packed[0] else size.lines
+                cols = packed[1] if packed[1] else size.columns
+            else:
+                packed = fcntl.ioctl(stdout_fd, termios.TIOCGWINSZ, b"\0" * 8)
+                rows, cols, _, _ = struct.unpack("HHHH", packed)
+                rows = rows or size.lines
+                cols = cols or size.columns
         except OSError:
             size = shutil.get_terminal_size()
             rows = size.lines
             cols = size.columns
 
         try:
-            termios.tcsetwinsize(master_fd, (rows, cols))
+            if hasattr(termios, "tcsetwinsize"):
+                termios.tcsetwinsize(master_fd, (rows, cols))
+            else:
+                packed = struct.pack("HHHH", rows, cols, 0, 0)
+                fcntl.ioctl(master_fd, termios.TIOCSWINSZ, packed)
         except OSError:
             pass
 
