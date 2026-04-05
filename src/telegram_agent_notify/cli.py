@@ -30,6 +30,9 @@ READY_MARKERS = (
     "Token usage:",
     "To continue this session, run codex resume",
 )
+PROMPT_PREFIXES = ("› ", "> ")
+STATUS_PREFIXES = ("Ran ", "Received.", "(no output)")
+IDLE_NOTIFY_SECONDS = 1.5
 
 
 @dataclass
@@ -45,6 +48,8 @@ class ReadyTracker:
     post_submit_output: str = ""
     pending: bool = False
     last_notification_monotonic: float = 0.0
+    last_output_monotonic: float = 0.0
+    completion_candidate_monotonic: float | None = None
 
     def record_input(self, data: bytes) -> None:
         for byte in data:
@@ -52,28 +57,49 @@ class ReadyTracker:
                 if self.current_input.strip():
                     self.pending = True
                     self.post_submit_output = ""
+                    self.completion_candidate_monotonic = None
                 self.current_input = ""
             elif byte in (8, 127):
                 self.current_input = self.current_input[:-1]
             elif 32 <= byte <= 126:
                 self.current_input += chr(byte)
 
-    def record_output(self, text: str) -> bool:
+    def record_output(self, text: str, now: float) -> bool:
         if not self.pending:
             return False
 
+        self.last_output_monotonic = now
         self.post_submit_output = (self.post_submit_output + text)[-4000:]
+        self._update_completion_candidate(text, now)
         return self._saw_ready_marker()
 
     def _saw_ready_marker(self) -> bool:
         return any(marker in self.post_submit_output for marker in READY_MARKERS)
 
+    def _update_completion_candidate(self, text: str, now: float) -> None:
+        for raw_line in text.splitlines():
+            line = normalize_line(raw_line)
+            if not line:
+                continue
+            if is_prompt_line(line):
+                continue
+            if is_status_line(line):
+                self.completion_candidate_monotonic = None
+                continue
+            self.completion_candidate_monotonic = now
+
     def should_notify(self, now: float) -> bool:
         return now - self.last_notification_monotonic > 2.0
+
+    def idle_completion_reached(self, now: float) -> bool:
+        if self.completion_candidate_monotonic is None:
+            return False
+        return now - self.last_output_monotonic >= IDLE_NOTIFY_SECONDS
 
     def mark_notified(self, now: float) -> None:
         self.pending = False
         self.post_submit_output = ""
+        self.completion_candidate_monotonic = None
         self.last_notification_monotonic = now
 
 
@@ -229,6 +255,18 @@ def strip_ansi(text: str) -> str:
     return OSC_ESCAPE_RE.sub("", ANSI_ESCAPE_RE.sub("", text))
 
 
+def normalize_line(raw_line: str) -> str:
+    return raw_line.strip().lstrip("•·*└│ ").strip()
+
+
+def is_prompt_line(line: str) -> bool:
+    return line.startswith(PROMPT_PREFIXES)
+
+
+def is_status_line(line: str) -> bool:
+    return line.startswith(STATUS_PREFIXES)
+
+
 def get_terminal_size(fd: int) -> tuple[int, int]:
     fallback = shutil.get_terminal_size()
     try:
@@ -319,10 +357,10 @@ def handle_child_output(
         raise EOFError
 
     os.write(stdout_fd, data)
-    if not tracker.record_output(strip_ansi(data.decode("utf-8", errors="ignore"))):
+    now = time.monotonic()
+    if not tracker.record_output(strip_ansi(data.decode("utf-8", errors="ignore")), now):
         return
 
-    now = time.monotonic()
     if not tracker.should_notify(now):
         return
 
@@ -358,11 +396,27 @@ def interactive_ready_mode(spec: CommandSpec) -> int:
 
         while True:
             try:
-                ready, _, _ = select([stdin_fd, master_fd], [], [])
+                ready, _, _ = select([stdin_fd, master_fd], [], [], 0.25)
             except OSError as exc:
                 if exc.errno == errno.EINTR:
                     continue
                 raise
+
+            now = time.monotonic()
+            if (
+                tracker.pending
+                and tracker.idle_completion_reached(now)
+                and tracker.should_notify(now)
+            ):
+                notify_or_warn(
+                    build_message(
+                        name=spec.name,
+                        command_text=spec.command_text,
+                        elapsed_seconds=now - start,
+                        event="is ready for the next task",
+                    )
+                )
+                tracker.mark_notified(now)
 
             if stdin_fd in ready:
                 data = os.read(stdin_fd, 1024)
