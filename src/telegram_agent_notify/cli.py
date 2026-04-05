@@ -51,6 +51,7 @@ class ReadyTracker:
     last_output_monotonic: float = 0.0
     completion_candidate_monotonic: float | None = None
     task_started_monotonic: float | None = None
+    submitted_prompt: str | None = None
     last_meaningful_line: str | None = None
 
     def record_input(self, data: bytes, now: float) -> None:
@@ -61,6 +62,7 @@ class ReadyTracker:
                     self.post_submit_output = ""
                     self.completion_candidate_monotonic = None
                     self.task_started_monotonic = now
+                    self.submitted_prompt = self.current_input.strip()
                     self.last_meaningful_line = None
                 self.current_input = ""
             elif byte in (8, 127):
@@ -166,6 +168,7 @@ def build_message(
     elapsed_seconds: float,
     event: str,
     returncode: int | None = None,
+    submitted_prompt: str | None = None,
     latest_output: str | None = None,
 ) -> str:
     lines = [
@@ -179,6 +182,9 @@ def build_message(
         status = "success" if returncode == 0 else "failure"
         lines.insert(1, f"status: {status}")
         lines.insert(2, f"exit code: {returncode}")
+
+    if submitted_prompt:
+        lines.append(f"prompt: {submitted_prompt}")
 
     if latest_output:
         lines.append(f"latest output: {latest_output}")
@@ -382,6 +388,7 @@ def handle_child_output(
             command_text=spec.command_text,
             elapsed_seconds=tracker.task_elapsed(now, start),
             event="is ready for the next task",
+            submitted_prompt=tracker.submitted_prompt,
             latest_output=tracker.last_meaningful_line,
         )
     )
@@ -427,6 +434,7 @@ def interactive_ready_mode(spec: CommandSpec) -> int:
                         command_text=spec.command_text,
                         elapsed_seconds=tracker.task_elapsed(now, start),
                         event="is ready for the next task",
+                        submitted_prompt=tracker.submitted_prompt,
                         latest_output=tracker.last_meaningful_line,
                     )
                 )
