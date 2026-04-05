@@ -106,12 +106,12 @@ def build_message(
 
 
 def get_telegram_config() -> tuple[str, str]:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID") or os.environ.get("CHAT_ID")
 
     if not token or not chat_id:
         raise RuntimeError(
-            "Telegram is not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env or your shell."
+            "Telegram is not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or BOT_TOKEN and CHAT_ID, in .env or your shell."
         )
 
     return token, chat_id
