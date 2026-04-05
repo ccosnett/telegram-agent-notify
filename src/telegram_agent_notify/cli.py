@@ -24,6 +24,7 @@ from select import select
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
+PROMPT_LINE_RE = re.compile(r"(?:^|\n)[›>]\s([^\n\r]*)")
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -203,6 +204,9 @@ def interactive_ready_mode(args: argparse.Namespace) -> int:
     pending_user_task = False
     typed_chars_since_submit = 0
     output_buffer = ""
+    post_submit_output = ""
+    submitted_text = ""
+    current_input = ""
 
     pid, master_fd = pty.fork()
     if pid == 0:
@@ -280,11 +284,16 @@ def interactive_ready_mode(args: argparse.Namespace) -> int:
                     if byte in (10, 13):
                         if typed_chars_since_submit > 0:
                             pending_user_task = True
+                            post_submit_output = ""
+                            submitted_text = current_input.strip()
                         typed_chars_since_submit = 0
+                        current_input = ""
                     elif byte in (8, 127):
                         typed_chars_since_submit = max(0, typed_chars_since_submit - 1)
+                        current_input = current_input[:-1]
                     elif 32 <= byte <= 126:
                         typed_chars_since_submit += 1
+                        current_input += chr(byte)
 
             if master_fd in ready:
                 try:
@@ -299,8 +308,27 @@ def interactive_ready_mode(args: argparse.Namespace) -> int:
 
                 cleaned = strip_ansi(data.decode("utf-8", errors="ignore"))
                 output_buffer = (output_buffer + cleaned)[-4000:]
+                if pending_user_task:
+                    post_submit_output = (post_submit_output + cleaned)[-4000:]
 
-                if pending_user_task and "Ready." in output_buffer:
+                prompt_returned = False
+                if pending_user_task:
+                    prompt_lines = PROMPT_LINE_RE.findall(post_submit_output)
+                    for prompt_text in prompt_lines:
+                        normalized_prompt = prompt_text.strip()
+                        if normalized_prompt and normalized_prompt == submitted_text:
+                            continue
+                        prompt_returned = True
+                        break
+
+                task_complete_markers = (
+                    "Ready." in post_submit_output
+                    or "Token usage:" in post_submit_output
+                    or "To continue this session, run codex resume" in post_submit_output
+                    or prompt_returned
+                )
+
+                if pending_user_task and task_complete_markers:
                     now = time.monotonic()
                     if now - last_notification_monotonic > 2:
                         elapsed = now - start
@@ -321,6 +349,8 @@ def interactive_ready_mode(args: argparse.Namespace) -> int:
 
                         last_notification_monotonic = now
                         pending_user_task = False
+                        post_submit_output = ""
+                        submitted_text = ""
 
             try:
                 child_pid, status = os.waitpid(pid, os.WNOHANG)
