@@ -46,6 +46,26 @@ the helper script:
 ./bin/agent-notify "codex --help"
 ```
 
+## Codex Example
+
+If you run Codex as follows:
+
+```bash
+codex --dangerously-bypass-approvals-and-sandbox
+```
+
+then your new shell command should be:
+
+```bash
+./bin/agent-notify "codex --dangerously-bypass-approvals-and-sandbox"
+```
+
+You can also run the Python entrypoint directly:
+
+```bash
+PYTHONPATH=src python3 -m telegram_agent_notify --name codex -- codex --dangerously-bypass-approvals-and-sandbox
+```
+
 ## Message Example
 
 ```text
