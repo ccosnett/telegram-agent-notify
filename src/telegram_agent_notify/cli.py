@@ -19,12 +19,62 @@ import tty
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from select import select
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
-PROMPT_LINE_RE = re.compile(r"(?:^|\n)[›>]\s([^\n\r]*)")
+READY_MARKERS = (
+    "Ready.",
+    "Token usage:",
+    "To continue this session, run codex resume",
+)
+
+
+@dataclass
+class CommandSpec:
+    command: str | list[str]
+    command_text: str
+    name: str
+
+
+@dataclass
+class ReadyTracker:
+    current_input: str = ""
+    post_submit_output: str = ""
+    pending: bool = False
+    last_notification_monotonic: float = 0.0
+
+    def record_input(self, data: bytes) -> None:
+        for byte in data:
+            if byte in (10, 13):
+                if self.current_input.strip():
+                    self.pending = True
+                    self.post_submit_output = ""
+                self.current_input = ""
+            elif byte in (8, 127):
+                self.current_input = self.current_input[:-1]
+            elif 32 <= byte <= 126:
+                self.current_input += chr(byte)
+
+    def record_output(self, text: str) -> bool:
+        if not self.pending:
+            return False
+
+        self.post_submit_output = (self.post_submit_output + text)[-4000:]
+        return self._saw_ready_marker()
+
+    def _saw_ready_marker(self) -> bool:
+        return any(marker in self.post_submit_output for marker in READY_MARKERS)
+
+    def should_notify(self, now: float) -> bool:
+        return now - self.last_notification_monotonic > 2.0
+
+    def mark_notified(self, now: float) -> None:
+        self.pending = False
+        self.post_submit_output = ""
+        self.last_notification_monotonic = now
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -40,7 +90,6 @@ def load_dotenv(path: str = ".env") -> None:
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-
             if key and key not in os.environ:
                 os.environ[key] = value
 
@@ -49,20 +98,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a command and send a Telegram message when it exits."
     )
-    parser.add_argument(
-        "--name",
-        default="agent",
-        help="Display name used in the Telegram message.",
-    )
-    parser.add_argument(
-        "--shell",
-        action="store_true",
-        help="Run the command through the shell.",
-    )
+    parser.add_argument("--name", default="agent", help="Display name for Telegram.")
+    parser.add_argument("--shell", action="store_true", help="Run through the shell.")
     parser.add_argument(
         "--watch-ready",
         action="store_true",
-        help="For interactive agents, notify when output returns to Ready.",
+        help="For interactive agents, notify when the UI returns to input-ready.",
     )
     parser.add_argument(
         "--test-telegram",
@@ -88,16 +129,15 @@ def build_message(
     *,
     name: str,
     command_text: str,
-    returncode: int | None,
     elapsed_seconds: float,
     event: str,
+    returncode: int | None = None,
 ) -> str:
-    host = socket.gethostname()
     lines = [
         f"{name} {event}",
         f"elapsed: {format_duration(elapsed_seconds)}",
         f"command: {command_text}",
-        f"host: {host}",
+        f"host: {socket.gethostname()}",
     ]
 
     if returncode is not None:
@@ -111,41 +151,40 @@ def build_message(
 def get_telegram_config() -> tuple[str, str]:
     token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID") or os.environ.get("CHAT_ID")
+    if token and chat_id:
+        return token, chat_id
 
-    if not token or not chat_id:
-        raise RuntimeError(
-            "Telegram is not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or BOT_TOKEN and CHAT_ID, in .env or your shell."
-        )
-
-    return token, chat_id
+    raise RuntimeError(
+        "Telegram is not configured. Set TELEGRAM_BOT_TOKEN and "
+        "TELEGRAM_CHAT_ID, or BOT_TOKEN and CHAT_ID, in .env or your shell."
+    )
 
 
 def send_telegram_message(message: str) -> None:
     token, chat_id = get_telegram_config()
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = urllib.parse.urlencode(
-        {
-            "chat_id": chat_id,
-            "text": message,
-        }
-    ).encode("utf-8")
+    payload = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode(
+        "utf-8"
+    )
     request = urllib.request.Request(url, data=payload, method="POST")
-
     with urllib.request.urlopen(request, timeout=15) as response:
         if response.status != 200:
             raise RuntimeError(f"Telegram API returned HTTP {response.status}.")
 
 
-def normalize_command(args: argparse.Namespace) -> tuple[str | list[str], str]:
-    if not args.command:
-        raise RuntimeError("No command provided. Use -- before the command.")
+def notify_or_warn(message: str) -> None:
+    try:
+        send_telegram_message(message)
+    except (RuntimeError, urllib.error.URLError) as exc:
+        print(f"\nwarning: failed to send Telegram notification: {exc}", file=sys.stderr)
 
-    raw_command = args.command
+
+def parse_command(args: argparse.Namespace) -> CommandSpec:
+    raw_command = list(args.command)
     if raw_command and raw_command[0] == "--":
         raw_command = raw_command[1:]
-
     if not raw_command:
-        raise RuntimeError("No command provided after --.")
+        raise RuntimeError("No command provided. Use -- before the command.")
 
     if args.shell:
         command: str | list[str] = " ".join(raw_command)
@@ -154,23 +193,33 @@ def normalize_command(args: argparse.Namespace) -> tuple[str | list[str], str]:
         command = raw_command
         command_text = shlex.join(raw_command)
 
-    return command, command_text
-
-
-def run_command(args: argparse.Namespace) -> int:
-    command, command_text = normalize_command(args)
-    get_telegram_config()
-
-    start = time.monotonic()
-    completed = subprocess.run(command, shell=args.shell, check=False)
-    elapsed = time.monotonic() - start
-
-    message = build_message(
-        name=args.name,
+    return CommandSpec(
+        command=command,
         command_text=command_text,
-        returncode=completed.returncode,
-        elapsed_seconds=elapsed,
+        name=infer_name(command_text, args.name),
+    )
+
+
+def infer_name(command_text: str, current_name: str) -> str:
+    if current_name != "agent":
+        return current_name
+
+    for candidate in ("codex", "claude"):
+        if command_text == candidate or command_text.startswith(f"{candidate} "):
+            return candidate
+    return current_name
+
+
+def run_command(spec: CommandSpec) -> int:
+    get_telegram_config()
+    start = time.monotonic()
+    completed = subprocess.run(spec.command, shell=isinstance(spec.command, str), check=False)
+    message = build_message(
+        name=spec.name,
+        command_text=spec.command_text,
+        elapsed_seconds=time.monotonic() - start,
         event="finished",
+        returncode=completed.returncode,
     )
     send_telegram_message(message)
     return completed.returncode
@@ -180,42 +229,49 @@ def strip_ansi(text: str) -> str:
     return OSC_ESCAPE_RE.sub("", ANSI_ESCAPE_RE.sub("", text))
 
 
-def infer_name_from_command(command_text: str, current_name: str) -> str:
-    if current_name != "agent":
-        return current_name
+def get_terminal_size(fd: int) -> tuple[int, int]:
+    fallback = shutil.get_terminal_size()
+    try:
+        if hasattr(termios, "tcgetwinsize"):
+            rows, cols = termios.tcgetwinsize(fd)
+            return rows or fallback.lines, cols or fallback.columns
 
-    for candidate in ("codex", "claude"):
-        if command_text == candidate or command_text.startswith(f"{candidate} "):
-            return candidate
+        packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8)
+        rows, cols, _, _ = struct.unpack("HHHH", packed)
+        return rows or fallback.lines, cols or fallback.columns
+    except OSError:
+        return fallback.lines, fallback.columns
 
-    return current_name
+
+def set_terminal_size(fd: int, rows: int, cols: int) -> None:
+    try:
+        if hasattr(termios, "tcsetwinsize"):
+            termios.tcsetwinsize(fd, (rows, cols))
+            return
+
+        packed = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, packed)
+    except OSError:
+        pass
 
 
-def interactive_ready_mode(args: argparse.Namespace) -> int:
-    command, command_text = normalize_command(args)
-    name = infer_name_from_command(command_text, args.name)
-    get_telegram_config()
+def exec_child(spec: CommandSpec) -> None:
+    if isinstance(spec.command, str):
+        shell = os.environ.get("SHELL") or shutil.which("sh") or "/bin/sh"
+        os.execvp(shell, [shell, "-lc", spec.command])
 
-    stdin_fd = sys.stdin.fileno()
-    stdout_fd = sys.stdout.fileno()
-    old_tty_settings = termios.tcgetattr(stdin_fd)
-    start = time.monotonic()
-    last_notification_monotonic = 0.0
-    pending_user_task = False
-    typed_chars_since_submit = 0
-    output_buffer = ""
-    post_submit_output = ""
-    submitted_text = ""
-    current_input = ""
+    os.execvp(spec.command[0], spec.command)
 
-    pid, master_fd = pty.fork()
-    if pid == 0:
-        if args.shell:
-            shell = os.environ.get("SHELL") or shutil.which("sh") or "/bin/sh"
-            os.execvp(shell, [shell, "-lc", command])
 
-        os.execvp(command[0], command)
+def child_returncode(status: int) -> int:
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return 1
 
+
+def install_signal_handlers(pid: int, master_fd: int, stdout_fd: int) -> tuple[object, object, object]:
     def forward_signal(signum: int, _frame: object) -> None:
         try:
             os.kill(pid, signum)
@@ -226,43 +282,79 @@ def interactive_ready_mode(args: argparse.Namespace) -> int:
     previous_sigint = signal.getsignal(signal.SIGINT)
     previous_sigterm = signal.getsignal(signal.SIGTERM)
 
-    def sync_winsize() -> None:
-        try:
-            size = shutil.get_terminal_size()
-            if hasattr(termios, "tcgetwinsize"):
-                packed = termios.tcgetwinsize(stdout_fd)
-                rows = packed[0] if packed[0] else size.lines
-                cols = packed[1] if packed[1] else size.columns
-            else:
-                packed = fcntl.ioctl(stdout_fd, termios.TIOCGWINSZ, b"\0" * 8)
-                rows, cols, _, _ = struct.unpack("HHHH", packed)
-                rows = rows or size.lines
-                cols = cols or size.columns
-        except OSError:
-            size = shutil.get_terminal_size()
-            rows = size.lines
-            cols = size.columns
-
-        try:
-            if hasattr(termios, "tcsetwinsize"):
-                termios.tcsetwinsize(master_fd, (rows, cols))
-            else:
-                packed = struct.pack("HHHH", rows, cols, 0, 0)
-                fcntl.ioctl(master_fd, termios.TIOCSWINSZ, packed)
-        except OSError:
-            pass
-
     def on_sigwinch(signum: int, frame: object) -> None:
-        sync_winsize()
+        rows, cols = get_terminal_size(stdout_fd)
+        set_terminal_size(master_fd, rows, cols)
         if callable(previous_sigwinch):
             previous_sigwinch(signum, frame)
 
+    signal.signal(signal.SIGWINCH, on_sigwinch)
+    signal.signal(signal.SIGINT, forward_signal)
+    signal.signal(signal.SIGTERM, forward_signal)
+    return previous_sigwinch, previous_sigint, previous_sigterm
+
+
+def restore_signal_handlers(previous_handlers: tuple[object, object, object]) -> None:
+    previous_sigwinch, previous_sigint, previous_sigterm = previous_handlers
+    signal.signal(signal.SIGWINCH, previous_sigwinch)
+    signal.signal(signal.SIGINT, previous_sigint)
+    signal.signal(signal.SIGTERM, previous_sigterm)
+
+
+def handle_child_output(
+    master_fd: int,
+    stdout_fd: int,
+    tracker: ReadyTracker,
+    spec: CommandSpec,
+    start: float,
+) -> None:
     try:
-        sync_winsize()
+        data = os.read(master_fd, 4096)
+    except OSError as exc:
+        if exc.errno == errno.EIO:
+            raise EOFError from exc
+        raise
+
+    if not data:
+        raise EOFError
+
+    os.write(stdout_fd, data)
+    if not tracker.record_output(strip_ansi(data.decode("utf-8", errors="ignore"))):
+        return
+
+    now = time.monotonic()
+    if not tracker.should_notify(now):
+        return
+
+    notify_or_warn(
+        build_message(
+            name=spec.name,
+            command_text=spec.command_text,
+            elapsed_seconds=now - start,
+            event="is ready for the next task",
+        )
+    )
+    tracker.mark_notified(now)
+
+
+def interactive_ready_mode(spec: CommandSpec) -> int:
+    get_telegram_config()
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    tracker = ReadyTracker()
+    start = time.monotonic()
+    old_tty_settings = termios.tcgetattr(stdin_fd)
+
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        exec_child(spec)
+
+    previous_handlers = install_signal_handlers(pid, master_fd, stdout_fd)
+    rows, cols = get_terminal_size(stdout_fd)
+    set_terminal_size(master_fd, rows, cols)
+
+    try:
         tty.setraw(stdin_fd)
-        signal.signal(signal.SIGWINCH, on_sigwinch)
-        signal.signal(signal.SIGINT, forward_signal)
-        signal.signal(signal.SIGTERM, forward_signal)
 
         while True:
             try:
@@ -277,80 +369,14 @@ def interactive_ready_mode(args: argparse.Namespace) -> int:
                 if not data:
                     os.close(master_fd)
                     break
-
                 os.write(master_fd, data)
-
-                for byte in data:
-                    if byte in (10, 13):
-                        if typed_chars_since_submit > 0:
-                            pending_user_task = True
-                            post_submit_output = ""
-                            submitted_text = current_input.strip()
-                        typed_chars_since_submit = 0
-                        current_input = ""
-                    elif byte in (8, 127):
-                        typed_chars_since_submit = max(0, typed_chars_since_submit - 1)
-                        current_input = current_input[:-1]
-                    elif 32 <= byte <= 126:
-                        typed_chars_since_submit += 1
-                        current_input += chr(byte)
+                tracker.record_input(data)
 
             if master_fd in ready:
                 try:
-                    data = os.read(master_fd, 4096)
-                except OSError:
+                    handle_child_output(master_fd, stdout_fd, tracker, spec, start)
+                except EOFError:
                     break
-
-                if not data:
-                    break
-
-                os.write(stdout_fd, data)
-
-                cleaned = strip_ansi(data.decode("utf-8", errors="ignore"))
-                output_buffer = (output_buffer + cleaned)[-4000:]
-                if pending_user_task:
-                    post_submit_output = (post_submit_output + cleaned)[-4000:]
-
-                prompt_returned = False
-                if pending_user_task:
-                    prompt_lines = PROMPT_LINE_RE.findall(post_submit_output)
-                    for prompt_text in prompt_lines:
-                        normalized_prompt = prompt_text.strip()
-                        if normalized_prompt and normalized_prompt == submitted_text:
-                            continue
-                        prompt_returned = True
-                        break
-
-                task_complete_markers = (
-                    "Ready." in post_submit_output
-                    or "Token usage:" in post_submit_output
-                    or "To continue this session, run codex resume" in post_submit_output
-                    or prompt_returned
-                )
-
-                if pending_user_task and task_complete_markers:
-                    now = time.monotonic()
-                    if now - last_notification_monotonic > 2:
-                        elapsed = now - start
-                        message = build_message(
-                            name=name,
-                            command_text=command_text,
-                            returncode=None,
-                            elapsed_seconds=elapsed,
-                            event="is ready for the next task",
-                        )
-                        try:
-                            send_telegram_message(message)
-                        except (RuntimeError, urllib.error.URLError) as exc:
-                            print(
-                                f"\nwarning: failed to send Telegram notification: {exc}",
-                                file=sys.stderr,
-                            )
-
-                        last_notification_monotonic = now
-                        pending_user_task = False
-                        post_submit_output = ""
-                        submitted_text = ""
 
             try:
                 child_pid, status = os.waitpid(pid, os.WNOHANG)
@@ -358,53 +384,45 @@ def interactive_ready_mode(args: argparse.Namespace) -> int:
                 break
 
             if child_pid == pid:
-                if os.WIFEXITED(status):
-                    returncode = os.WEXITSTATUS(status)
-                elif os.WIFSIGNALED(status):
-                    returncode = 128 + os.WTERMSIG(status)
-                else:
-                    returncode = 1
-
-                elapsed = time.monotonic() - start
-                message = build_message(
-                    name=name,
-                    command_text=command_text,
-                    returncode=returncode,
-                    elapsed_seconds=elapsed,
-                    event="finished",
-                )
-                try:
-                    send_telegram_message(message)
-                except (RuntimeError, urllib.error.URLError) as exc:
-                    print(
-                        f"\nwarning: failed to send Telegram notification: {exc}",
-                        file=sys.stderr,
+                returncode = child_returncode(status)
+                notify_or_warn(
+                    build_message(
+                        name=spec.name,
+                        command_text=spec.command_text,
+                        elapsed_seconds=time.monotonic() - start,
+                        event="finished",
+                        returncode=returncode,
                     )
+                )
                 return returncode
 
         _, status = os.waitpid(pid, 0)
-        if os.WIFEXITED(status):
-            return os.WEXITSTATUS(status)
-        if os.WIFSIGNALED(status):
-            return 128 + os.WTERMSIG(status)
-        return 1
+        returncode = child_returncode(status)
+        notify_or_warn(
+            build_message(
+                name=spec.name,
+                command_text=spec.command_text,
+                elapsed_seconds=time.monotonic() - start,
+                event="finished",
+                returncode=returncode,
+            )
+        )
+        return returncode
     finally:
         termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_tty_settings)
-        signal.signal(signal.SIGWINCH, previous_sigwinch)
-        signal.signal(signal.SIGINT, previous_sigint)
-        signal.signal(signal.SIGTERM, previous_sigterm)
+        restore_signal_handlers(previous_handlers)
 
 
 def send_test_message(name: str) -> None:
     get_telegram_config()
-    message = build_message(
-        name=name,
-        command_text="telegram test",
-        returncode=None,
-        elapsed_seconds=0,
-        event="test notification",
+    send_telegram_message(
+        build_message(
+            name=name,
+            command_text="telegram test",
+            elapsed_seconds=0,
+            event="test notification",
+        )
     )
-    send_telegram_message(message)
 
 
 def main() -> None:
@@ -416,10 +434,10 @@ def main() -> None:
             send_test_message(args.name)
             raise SystemExit(0)
 
+        spec = parse_command(args)
         if args.watch_ready:
-            raise SystemExit(interactive_ready_mode(args))
-
-        raise SystemExit(run_command(args))
+            raise SystemExit(interactive_ready_mode(spec))
+        raise SystemExit(run_command(spec))
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

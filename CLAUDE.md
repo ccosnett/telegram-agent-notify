@@ -47,7 +47,7 @@ Instead of notifying on process exit, it tries to infer:
 
 - the user submitted a prompt
 - the agent processed it
-- the UI returned to an input-ready state
+- Codex emitted a reliable end-of-task marker
 
 When that happens, the wrapper sends a Telegram message even though the agent
 process is still running.
@@ -158,7 +158,7 @@ When `--watch-ready` is enabled, the wrapper:
 3. forwards stdout from the child PTY back to the user terminal
 4. tracks what the user typed before pressing Enter
 5. tracks the output that appears after that submission
-6. decides whether the agent has returned to a ready-for-input state
+6. decides whether Codex has emitted a completion marker
 
 ### Why a PTY is required
 
@@ -187,29 +187,10 @@ completion signal:
 - the output contains `Ready.`
 - the output contains `Token usage:`
 - the output contains `To continue this session, run codex resume`
-- the output shows the prompt returning after the task output
 
-The prompt-return heuristic exists because Codex does not always print the same
-final marker. In some sessions it visibly returns to a new prompt without
-printing `Ready.`.
-
-### Prompt-return heuristic
-
-The code strips ANSI escape sequences from the terminal stream and then looks
-for prompt lines using this pattern:
-
-- a line starting with `› `
-- or a line starting with `> `
-
-That is implemented with `PROMPT_LINE_RE`.
-
-After the user submits a prompt, the wrapper watches for a new prompt line in
-the subsequent output. If a prompt comes back and it is not just the same echoed
-prompt text the user typed, the wrapper treats that as "the agent is ready for
-the next task."
-
-This is heuristic, not protocol-level integration. It can break if Codex
-changes its terminal UI.
+This is intentionally conservative. A previous prompt-return heuristic caused
+false positives because Codex can redraw an input area before the task is
+actually finished.
 
 ## Claude Code Support
 
@@ -263,7 +244,7 @@ Minimal package metadata and console script definition.
 ## Known Limitations
 
 - Completion detection is heuristic and specific to current Codex terminal
-  behavior.
+  behavior, even though it now uses only explicit completion markers.
 - The current `.env` parser is intentionally basic and not fully dotenv
   compatible.
 - The helper script still relies on `PYTHONPATH=src` rather than an installed
@@ -293,5 +274,5 @@ If you need to modify this project, the key design assumption is:
 `finished` does not necessarily mean `process exited`
 
 For interactive coding agents, the important problem is detecting when the
-terminal UI returns to a state where the human can submit the next task. Nearly
-all of the complexity in this project exists because of that distinction.
+terminal output has reached a trustworthy end-of-task marker. Nearly all of the
+complexity in this project exists because of that distinction.
