@@ -50,14 +50,18 @@ class ReadyTracker:
     last_notification_monotonic: float = 0.0
     last_output_monotonic: float = 0.0
     completion_candidate_monotonic: float | None = None
+    task_started_monotonic: float | None = None
+    last_meaningful_line: str | None = None
 
-    def record_input(self, data: bytes) -> None:
+    def record_input(self, data: bytes, now: float) -> None:
         for byte in data:
             if byte in (10, 13):
                 if self.current_input.strip():
                     self.pending = True
                     self.post_submit_output = ""
                     self.completion_candidate_monotonic = None
+                    self.task_started_monotonic = now
+                    self.last_meaningful_line = None
                 self.current_input = ""
             elif byte in (8, 127):
                 self.current_input = self.current_input[:-1]
@@ -87,6 +91,7 @@ class ReadyTracker:
                 self.completion_candidate_monotonic = None
                 continue
             self.completion_candidate_monotonic = now
+            self.last_meaningful_line = line
 
     def should_notify(self, now: float) -> bool:
         return now - self.last_notification_monotonic > 2.0
@@ -101,6 +106,9 @@ class ReadyTracker:
         self.post_submit_output = ""
         self.completion_candidate_monotonic = None
         self.last_notification_monotonic = now
+
+    def task_elapsed(self, now: float, default_start: float) -> float:
+        return now - (self.task_started_monotonic or default_start)
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -158,6 +166,7 @@ def build_message(
     elapsed_seconds: float,
     event: str,
     returncode: int | None = None,
+    latest_output: str | None = None,
 ) -> str:
     lines = [
         f"{name} {event}",
@@ -170,6 +179,9 @@ def build_message(
         status = "success" if returncode == 0 else "failure"
         lines.insert(1, f"status: {status}")
         lines.insert(2, f"exit code: {returncode}")
+
+    if latest_output:
+        lines.append(f"latest output: {latest_output}")
 
     return "\n".join(lines)
 
@@ -368,8 +380,9 @@ def handle_child_output(
         build_message(
             name=spec.name,
             command_text=spec.command_text,
-            elapsed_seconds=now - start,
+            elapsed_seconds=tracker.task_elapsed(now, start),
             event="is ready for the next task",
+            latest_output=tracker.last_meaningful_line,
         )
     )
     tracker.mark_notified(now)
@@ -412,8 +425,9 @@ def interactive_ready_mode(spec: CommandSpec) -> int:
                     build_message(
                         name=spec.name,
                         command_text=spec.command_text,
-                        elapsed_seconds=now - start,
+                        elapsed_seconds=tracker.task_elapsed(now, start),
                         event="is ready for the next task",
+                        latest_output=tracker.last_meaningful_line,
                     )
                 )
                 tracker.mark_notified(now)
@@ -424,7 +438,7 @@ def interactive_ready_mode(spec: CommandSpec) -> int:
                     os.close(master_fd)
                     break
                 os.write(master_fd, data)
-                tracker.record_input(data)
+                tracker.record_input(data, now)
 
             if master_fd in ready:
                 try:
