@@ -7,4 +7,22 @@ if [ "$#" -eq 0 ]; then
   exit 1
 fi
 
-PYTHONPATH=src python3 -m telegram_agent_notify --shell --name agent -- "$*"
+command_text="$*"
+name="agent"
+watch_ready="no"
+
+case "$command_text" in
+  codex|codex\ *)
+    name="codex"
+    watch_ready="yes"
+    ;;
+  claude|claude\ *)
+    name="claude"
+    ;;
+esac
+
+if [ "$watch_ready" = "yes" ]; then
+  PYTHONPATH=src python3 -m telegram_agent_notify --watch-ready --shell --name "$name" -- "$command_text"
+else
+  PYTHONPATH=src python3 -m telegram_agent_notify --shell --name "$name" -- "$command_text"
+fi

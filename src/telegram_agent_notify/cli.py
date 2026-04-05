@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import os
+import pty
+import re
 import shlex
+import shutil
+import signal
 import socket
 import subprocess
 import sys
+import termios
 import time
+import tty
 import urllib.error
 import urllib.parse
 import urllib.request
+from select import select
+
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 
 
 def load_dotenv(path: str = ".env") -> None:
@@ -45,6 +57,16 @@ def parse_args() -> argparse.Namespace:
         help="Run the command through the shell.",
     )
     parser.add_argument(
+        "--watch-ready",
+        action="store_true",
+        help="For interactive agents, notify when output returns to Ready.",
+    )
+    parser.add_argument(
+        "--test-telegram",
+        action="store_true",
+        help="Send a test message and exit.",
+    )
+    parser.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="Command to run. Separate it from options using --.",
@@ -63,31 +85,40 @@ def build_message(
     *,
     name: str,
     command_text: str,
-    returncode: int,
+    returncode: int | None,
     elapsed_seconds: float,
+    event: str,
 ) -> str:
-    status = "success" if returncode == 0 else "failure"
     host = socket.gethostname()
     lines = [
-        f"{name} finished",
-        f"status: {status}",
-        f"exit code: {returncode}",
+        f"{name} {event}",
         f"elapsed: {format_duration(elapsed_seconds)}",
         f"command: {command_text}",
         f"host: {host}",
     ]
+
+    if returncode is not None:
+        status = "success" if returncode == 0 else "failure"
+        lines.insert(1, f"status: {status}")
+        lines.insert(2, f"exit code: {returncode}")
+
     return "\n".join(lines)
 
 
-def send_telegram_message(message: str) -> None:
+def get_telegram_config() -> tuple[str, str]:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
     if not token or not chat_id:
         raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set in the environment."
+            "Telegram is not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env or your shell."
         )
 
+    return token, chat_id
+
+
+def send_telegram_message(message: str) -> None:
+    token, chat_id = get_telegram_config()
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = urllib.parse.urlencode(
         {
@@ -102,7 +133,7 @@ def send_telegram_message(message: str) -> None:
             raise RuntimeError(f"Telegram API returned HTTP {response.status}.")
 
 
-def run_command(args: argparse.Namespace) -> int:
+def normalize_command(args: argparse.Namespace) -> tuple[str | list[str], str]:
     if not args.command:
         raise RuntimeError("No command provided. Use -- before the command.")
 
@@ -120,6 +151,13 @@ def run_command(args: argparse.Namespace) -> int:
         command = raw_command
         command_text = shlex.join(raw_command)
 
+    return command, command_text
+
+
+def run_command(args: argparse.Namespace) -> int:
+    command, command_text = normalize_command(args)
+    get_telegram_config()
+
     start = time.monotonic()
     completed = subprocess.run(command, shell=args.shell, check=False)
     elapsed = time.monotonic() - start
@@ -129,20 +167,216 @@ def run_command(args: argparse.Namespace) -> int:
         command_text=command_text,
         returncode=completed.returncode,
         elapsed_seconds=elapsed,
+        event="finished",
     )
+    send_telegram_message(message)
+    return completed.returncode
+
+
+def strip_ansi(text: str) -> str:
+    return OSC_ESCAPE_RE.sub("", ANSI_ESCAPE_RE.sub("", text))
+
+
+def infer_name_from_command(command_text: str, current_name: str) -> str:
+    if current_name != "agent":
+        return current_name
+
+    for candidate in ("codex", "claude"):
+        if command_text == candidate or command_text.startswith(f"{candidate} "):
+            return candidate
+
+    return current_name
+
+
+def interactive_ready_mode(args: argparse.Namespace) -> int:
+    command, command_text = normalize_command(args)
+    name = infer_name_from_command(command_text, args.name)
+    get_telegram_config()
+
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    old_tty_settings = termios.tcgetattr(stdin_fd)
+    start = time.monotonic()
+    last_notification_monotonic = 0.0
+    pending_user_task = False
+    typed_chars_since_submit = 0
+    output_buffer = ""
+
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        if args.shell:
+            shell = os.environ.get("SHELL") or shutil.which("sh") or "/bin/sh"
+            os.execvp(shell, [shell, "-lc", command])
+
+        os.execvp(command[0], command)
+
+    def forward_signal(signum: int, _frame: object) -> None:
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            pass
+
+    previous_sigwinch = signal.getsignal(signal.SIGWINCH)
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def sync_winsize() -> None:
+        try:
+            size = shutil.get_terminal_size()
+            packed = termios.tcgetwinsize(stdout_fd)
+            rows = packed[0] if packed[0] else size.lines
+            cols = packed[1] if packed[1] else size.columns
+        except OSError:
+            size = shutil.get_terminal_size()
+            rows = size.lines
+            cols = size.columns
+
+        try:
+            termios.tcsetwinsize(master_fd, (rows, cols))
+        except OSError:
+            pass
+
+    def on_sigwinch(signum: int, frame: object) -> None:
+        sync_winsize()
+        if callable(previous_sigwinch):
+            previous_sigwinch(signum, frame)
 
     try:
-        send_telegram_message(message)
-    except (RuntimeError, urllib.error.URLError) as exc:
-        print(f"warning: failed to send Telegram notification: {exc}", file=sys.stderr)
+        sync_winsize()
+        tty.setraw(stdin_fd)
+        signal.signal(signal.SIGWINCH, on_sigwinch)
+        signal.signal(signal.SIGINT, forward_signal)
+        signal.signal(signal.SIGTERM, forward_signal)
 
-    return completed.returncode
+        while True:
+            try:
+                ready, _, _ = select([stdin_fd, master_fd], [], [])
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue
+                raise
+
+            if stdin_fd in ready:
+                data = os.read(stdin_fd, 1024)
+                if not data:
+                    os.close(master_fd)
+                    break
+
+                os.write(master_fd, data)
+
+                for byte in data:
+                    if byte in (10, 13):
+                        if typed_chars_since_submit > 0:
+                            pending_user_task = True
+                        typed_chars_since_submit = 0
+                    elif byte in (8, 127):
+                        typed_chars_since_submit = max(0, typed_chars_since_submit - 1)
+                    elif 32 <= byte <= 126:
+                        typed_chars_since_submit += 1
+
+            if master_fd in ready:
+                try:
+                    data = os.read(master_fd, 4096)
+                except OSError:
+                    break
+
+                if not data:
+                    break
+
+                os.write(stdout_fd, data)
+
+                cleaned = strip_ansi(data.decode("utf-8", errors="ignore"))
+                output_buffer = (output_buffer + cleaned)[-4000:]
+
+                if pending_user_task and "Ready." in output_buffer:
+                    now = time.monotonic()
+                    if now - last_notification_monotonic > 2:
+                        elapsed = now - start
+                        message = build_message(
+                            name=name,
+                            command_text=command_text,
+                            returncode=None,
+                            elapsed_seconds=elapsed,
+                            event="is ready for the next task",
+                        )
+                        try:
+                            send_telegram_message(message)
+                        except (RuntimeError, urllib.error.URLError) as exc:
+                            print(
+                                f"\nwarning: failed to send Telegram notification: {exc}",
+                                file=sys.stderr,
+                            )
+
+                        last_notification_monotonic = now
+                        pending_user_task = False
+
+            try:
+                child_pid, status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                break
+
+            if child_pid == pid:
+                if os.WIFEXITED(status):
+                    returncode = os.WEXITSTATUS(status)
+                elif os.WIFSIGNALED(status):
+                    returncode = 128 + os.WTERMSIG(status)
+                else:
+                    returncode = 1
+
+                elapsed = time.monotonic() - start
+                message = build_message(
+                    name=name,
+                    command_text=command_text,
+                    returncode=returncode,
+                    elapsed_seconds=elapsed,
+                    event="finished",
+                )
+                try:
+                    send_telegram_message(message)
+                except (RuntimeError, urllib.error.URLError) as exc:
+                    print(
+                        f"\nwarning: failed to send Telegram notification: {exc}",
+                        file=sys.stderr,
+                    )
+                return returncode
+
+        _, status = os.waitpid(pid, 0)
+        if os.WIFEXITED(status):
+            return os.WEXITSTATUS(status)
+        if os.WIFSIGNALED(status):
+            return 128 + os.WTERMSIG(status)
+        return 1
+    finally:
+        termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_tty_settings)
+        signal.signal(signal.SIGWINCH, previous_sigwinch)
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
+
+
+def send_test_message(name: str) -> None:
+    get_telegram_config()
+    message = build_message(
+        name=name,
+        command_text="telegram test",
+        returncode=None,
+        elapsed_seconds=0,
+        event="test notification",
+    )
+    send_telegram_message(message)
 
 
 def main() -> None:
     load_dotenv()
     args = parse_args()
+
     try:
+        if args.test_telegram:
+            send_test_message(args.name)
+            raise SystemExit(0)
+
+        if args.watch_ready:
+            raise SystemExit(interactive_ready_mode(args))
+
         raise SystemExit(run_command(args))
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)

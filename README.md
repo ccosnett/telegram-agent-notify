@@ -8,8 +8,8 @@ This project keeps the first version simple:
 
 - you provide a Telegram bot token and chat ID
 - you run your coding agent through the wrapper
-- the wrapper waits for the command to finish
-- it sends a Telegram message with success or failure, exit code, and elapsed time
+- for Codex, the wrapper can notify when the app returns to `Ready.`
+- it sends a Telegram message with the command, host, and elapsed time
 
 ## Setup
 
@@ -22,6 +22,12 @@ This project keeps the first version simple:
 ```bash
 export TELEGRAM_BOT_TOKEN=123456789:replace_me
 export TELEGRAM_CHAT_ID=123456789
+```
+
+6. Send yourself a test notification before debugging the agent integration:
+
+```bash
+PYTHONPATH=src python3 -m telegram_agent_notify --test-telegram
 ```
 
 ## Usage
@@ -46,6 +52,8 @@ the helper script:
 ./bin/agent-notify "codex --help"
 ```
 
+When the helper sees a Codex command, it automatically enables `Ready.` watching.
+
 ## Codex Example
 
 If you run Codex as follows:
@@ -63,7 +71,7 @@ then your new shell command should be:
 You can also run the Python entrypoint directly:
 
 ```bash
-PYTHONPATH=src python3 -m telegram_agent_notify --name codex -- codex --dangerously-bypass-approvals-and-sandbox
+PYTHONPATH=src python3 -m telegram_agent_notify --watch-ready --name codex -- codex --dangerously-bypass-approvals-and-sandbox
 ```
 
 ## Claude Code Example
@@ -89,16 +97,15 @@ PYTHONPATH=src python3 -m telegram_agent_notify --name claude -- claude --danger
 ## Message Example
 
 ```text
-codex finished
-status: success
-exit code: 0
+codex is ready for the next task
 elapsed: 00:03:12
-command: codex
+command: codex --dangerously-bypass-approvals-and-sandbox
 host: my-laptop
 ```
 
 ## Notes
 
-- This version wraps command execution directly.
-- It does not yet detect task completion from arbitrary already-running agents.
+- Telegram config is required before the wrapper starts the agent.
+- Codex notifications are triggered when the UI returns to `Ready.` after you submit a prompt.
+- Other commands still notify on process exit.
 - The command's stdout and stderr still stream in your terminal as normal.
