@@ -66,6 +66,26 @@ You can also run the Python entrypoint directly:
 PYTHONPATH=src python3 -m telegram_agent_notify --name codex -- codex --dangerously-bypass-approvals-and-sandbox
 ```
 
+## Claude Code Example
+
+If you run Claude Code as follows:
+
+```bash
+claude --dangerously-skip-permissions
+```
+
+then your new shell command should be:
+
+```bash
+./bin/agent-notify "claude --dangerously-skip-permissions"
+```
+
+You can also run the Python entrypoint directly:
+
+```bash
+PYTHONPATH=src python3 -m telegram_agent_notify --name claude -- claude --dangerously-skip-permissions
+```
+
 ## Message Example
 
 ```text
