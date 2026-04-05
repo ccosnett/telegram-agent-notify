@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: ./bin/agent-notify <command>"
+  echo 'example: ./bin/agent-notify "codex --help"'
+  exit 1
+fi
+
+PYTHONPATH=src python3 -m telegram_agent_notify --shell --name agent -- "$*"

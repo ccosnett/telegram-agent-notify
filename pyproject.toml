@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-agent-notify"
+version = "0.1.0"
+description = "Send Telegram notifications when a local coding agent finishes."
+readme = "README.md"
+requires-python = ">=3.12"
+
+[project.scripts]
+telegram-agent-notify = "telegram_agent_notify.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
