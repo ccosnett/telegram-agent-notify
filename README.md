@@ -54,6 +54,36 @@ the helper script:
 
 When the helper sees a Codex command, it automatically enables `Ready.` watching.
 
+## Use From Any Directory
+
+You can run the notifier from other projects by calling the helper with its
+absolute path:
+
+```bash
+/Users/johncosnett/PycharmProjects/telegram-agent-notify/bin/agent-notify "codex --dangerously-bypass-approvals-and-sandbox"
+```
+
+This starts Codex in your current working directory, so it still operates on
+whatever project you are currently inside.
+
+If you want a shorter command, add an alias to your `~/.zshrc`:
+
+```bash
+alias codex-notify='/Users/johncosnett/PycharmProjects/telegram-agent-notify/bin/agent-notify'
+```
+
+Then reload your shell:
+
+```bash
+source ~/.zshrc
+```
+
+And use:
+
+```bash
+codex-notify "codex --dangerously-bypass-approvals-and-sandbox"
+```
+
 ## Codex Example
 
 If you run Codex as follows:
