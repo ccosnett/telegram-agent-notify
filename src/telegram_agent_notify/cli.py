@@ -53,9 +53,42 @@ class ReadyTracker:
     task_started_monotonic: float | None = None
     submitted_prompt: str | None = None
     last_meaningful_line: str | None = None
+    input_escape_state: str | None = None
+    osc_escape_pending: bool = False
 
     def record_input(self, data: bytes, now: float) -> None:
         for byte in data:
+            if self.input_escape_state == "esc":
+                if byte == ord("["):
+                    self.input_escape_state = "csi"
+                elif byte == ord("]"):
+                    self.input_escape_state = "osc"
+                    self.osc_escape_pending = False
+                else:
+                    self.input_escape_state = None
+                continue
+
+            if self.input_escape_state == "csi":
+                if 64 <= byte <= 126:
+                    self.input_escape_state = None
+                continue
+
+            if self.input_escape_state == "osc":
+                if byte == 7:
+                    self.input_escape_state = None
+                    self.osc_escape_pending = False
+                    continue
+                if self.osc_escape_pending and byte == 92:
+                    self.input_escape_state = None
+                    self.osc_escape_pending = False
+                    continue
+                self.osc_escape_pending = byte == 27
+                continue
+
+            if byte == 27:
+                self.input_escape_state = "esc"
+                continue
+
             if byte in (10, 13):
                 if self.current_input.strip():
                     self.pending = True
