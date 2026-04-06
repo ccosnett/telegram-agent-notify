@@ -146,7 +146,7 @@ class ReadyTracker:
         return now - (self.task_started_monotonic or default_start)
 
 
-def load_dotenv(path: str = ".env") -> None:
+def _load_dotenv_file(path: str) -> None:
     if not os.path.exists(path):
         return
 
@@ -161,6 +161,21 @@ def load_dotenv(path: str = ".env") -> None:
             value = value.strip().strip('"').strip("'")
             if key and key not in os.environ:
                 os.environ[key] = value
+
+
+def load_dotenv(path: str = ".env") -> None:
+    home = os.environ.get("TELEGRAM_AGENT_NOTIFY_HOME")
+    paths = [path]
+    if home:
+        paths.append(os.path.join(home, ".env"))
+
+    seen: set[str] = set()
+    for candidate in paths:
+        resolved = os.path.abspath(candidate)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        _load_dotenv_file(candidate)
 
 
 def parse_args() -> argparse.Namespace:
