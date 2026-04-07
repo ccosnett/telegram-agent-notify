@@ -165,9 +165,11 @@ def _load_dotenv_file(path: str) -> None:
 
 def load_dotenv(path: str = ".env") -> None:
     home = os.environ.get("TELEGRAM_AGENT_NOTIFY_HOME")
+    package_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     paths = [path]
     if home:
         paths.append(os.path.join(home, ".env"))
+    paths.append(os.path.join(package_root, ".env"))
 
     seen: set[str] = set()
     for candidate in paths:

@@ -17,17 +17,24 @@ This project keeps the first version simple:
 2. Get your bot token.
 3. Start a chat with the bot.
 4. Find your chat ID.
-5. Copy `.env.example` to `.env` or export these environment variables:
+5. Install `uv` if you do not already have it.
+6. Create the local virtual environment and install the project:
+
+```bash
+uv sync
+```
+
+7. Copy `.env.example` to `.env` or export these environment variables:
 
 ```bash
 export TELEGRAM_BOT_TOKEN=123456789:replace_me
 export TELEGRAM_CHAT_ID=123456789
 ```
 
-6. Send yourself a test notification before debugging the agent integration:
+8. Send yourself a test notification before debugging the agent integration:
 
 ```bash
-PYTHONPATH=src python3 -m telegram_agent_notify --test-telegram
+uv run telegram-agent-notify --test-telegram
 ```
 
 ## Usage
@@ -35,13 +42,13 @@ PYTHONPATH=src python3 -m telegram_agent_notify --test-telegram
 Run any terminal command through the notifier:
 
 ```bash
-PYTHONPATH=src python3 -m telegram_agent_notify --name codex -- codex
+uv run telegram-agent-notify --name codex -- codex
 ```
 
 For a longer command:
 
 ```bash
-PYTHONPATH=src python3 -m telegram_agent_notify --name agent -- your-agent-command --arg1 --arg2
+uv run telegram-agent-notify --name agent -- your-agent-command --arg1 --arg2
 ```
 
 If your agent is normally started through a shell alias or shell pipeline, use
@@ -53,6 +60,8 @@ the helper script:
 ```
 
 When the helper sees a Codex command, it automatically enables `Ready.` watching.
+The helper itself uses `uv run --project ...`, so it works from other directories
+without relying on `PYTHONPATH`.
 
 ## Use From Any Directory
 
@@ -64,7 +73,14 @@ absolute path:
 ```
 
 This starts Codex in your current working directory, so it still operates on
-whatever project you are currently inside.
+whatever project you are currently inside. The helper resolves its own repo and
+uses that project's `uv` environment.
+
+You can also call the installed CLI directly through `uv` from any directory:
+
+```bash
+uv run --project /Users/johncosnett/PycharmProjects/telegram-agent-notify telegram-agent-notify --watch-ready --name codex --shell -- "codex --dangerously-bypass-approvals-and-sandbox"
+```
 
 If you want a shorter command, add an alias to your `~/.zshrc`:
 
@@ -98,10 +114,10 @@ then your new shell command should be:
 ./bin/agent-notify "codex --dangerously-bypass-approvals-and-sandbox"
 ```
 
-You can also run the Python entrypoint directly:
+You can also run the installed CLI directly:
 
 ```bash
-PYTHONPATH=src python3 -m telegram_agent_notify --watch-ready --name codex -- codex --dangerously-bypass-approvals-and-sandbox
+uv run telegram-agent-notify --watch-ready --name codex -- codex --dangerously-bypass-approvals-and-sandbox
 ```
 
 ## Claude Code Example
@@ -118,10 +134,10 @@ then your new shell command should be:
 ./bin/agent-notify "claude --dangerously-skip-permissions"
 ```
 
-You can also run the Python entrypoint directly:
+You can also run the installed CLI directly:
 
 ```bash
-PYTHONPATH=src python3 -m telegram_agent_notify --name claude -- claude --dangerously-skip-permissions
+uv run telegram-agent-notify --name claude -- claude --dangerously-skip-permissions
 ```
 
 ## Message Example
@@ -136,6 +152,7 @@ host: my-laptop
 ## Notes
 
 - Telegram config is required before the wrapper starts the agent.
-- Codex notifications are triggered when the UI returns to `Ready.` after you submit a prompt.
+- Run `uv sync` once before using the helper or direct CLI.
+- Codex notifications are triggered when the wrapper sees reliable completion output after you submit a prompt.
 - Other commands still notify on process exit.
 - The command's stdout and stderr still stream in your terminal as normal.

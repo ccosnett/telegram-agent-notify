@@ -65,7 +65,7 @@ This script:
 - accepts a single quoted command string
 - chooses a display name based on the command
 - enables interactive ready-state watching automatically for Codex
-- delegates execution to the Python module
+- delegates execution to the installed CLI through `uv run --project`
 
 Current command routing rules:
 
@@ -95,6 +95,18 @@ It supports:
 - `--shell`
 - `--name`
 - `--watch-ready`
+
+### Packaging and runtime
+
+This project now expects a `uv` workflow:
+
+- `uv sync` creates the local `.venv`
+- the project is installed into that environment
+- the helper script uses `uv run --project <repo>` to execute the CLI from any
+  working directory
+- config loading can still find the repo's `.env` when launched that way
+
+This replaced the older `PYTHONPATH=src` approach.
 
 ## Configuration
 
@@ -227,7 +239,8 @@ Contains almost all runtime logic:
 
 ### [src/telegram_agent_notify/__main__.py](/Users/johncosnett/PycharmProjects/telegram-agent-notify/src/telegram_agent_notify/__main__.py)
 
-Makes `python3 -m telegram_agent_notify` work.
+Makes `python3 -m telegram_agent_notify` work, although the preferred runtime
+path is now the installed CLI via `uv run`.
 
 ### [README.md](/Users/johncosnett/PycharmProjects/telegram-agent-notify/README.md)
 
@@ -239,7 +252,11 @@ Original short statement of project scope.
 
 ### [pyproject.toml](/Users/johncosnett/PycharmProjects/telegram-agent-notify/pyproject.toml)
 
-Minimal package metadata and console script definition.
+Minimal package metadata and console script definition used by `uv sync`.
+
+### [uv.lock](/Users/johncosnett/PycharmProjects/telegram-agent-notify/uv.lock)
+
+Lockfile for the `uv`-managed environment.
 
 ## Known Limitations
 
@@ -247,8 +264,6 @@ Minimal package metadata and console script definition.
   behavior, even though it now uses only explicit completion markers.
 - The current `.env` parser is intentionally basic and not fully dotenv
   compatible.
-- The helper script still relies on `PYTHONPATH=src` rather than an installed
-  package.
 - There is no persistent logging or debug trace of raw terminal output.
 - Telegram delivery failures are only surfaced as stderr warnings during runtime.
 - There is no retry logic for transient Telegram API failures.
@@ -256,8 +271,6 @@ Minimal package metadata and console script definition.
 
 ## Suggested Next Improvements
 
-- install the package in editable mode and remove the `PYTHONPATH=src`
-  requirement from user-facing commands
 - add a `--debug` mode that writes sanitized terminal output and matched
   completion markers to a log file
 - add tests around:

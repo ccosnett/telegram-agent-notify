@@ -27,6 +27,5 @@ args=(--shell --name "$name" -- "$command_text")
 [ "$watch_ready" = "yes" ] && args=(--watch-ready "${args[@]}")
 
 exec env \
-  PYTHONPATH="$project_root/src" \
   TELEGRAM_AGENT_NOTIFY_HOME="$project_root" \
-  python3 -m telegram_agent_notify "${args[@]}"
+  uv run --project "$project_root" telegram-agent-notify "${args[@]}"
