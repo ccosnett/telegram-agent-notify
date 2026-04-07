@@ -1,88 +1,68 @@
 # telegram-agent-notify
 
-Run a local coding-agent command and send a Telegram message when it finishes.
+Send yourself a Telegram message when a local Codex task finishes.
 
 ## What It Does
 
-This project keeps the first version simple:
+This project wraps Codex in your terminal and sends a Telegram message when
+Codex appears to be done with the task you just submitted.
 
-- you provide a Telegram bot token and chat ID
-- you run your coding agent through the wrapper
-- for Codex, the wrapper can notify when the app returns to `Ready.`
-- it sends a Telegram message with the command, host, and elapsed time
+The notification includes:
+
+- elapsed time for that task
+- the Codex command that was run
+- the host name
+- the prompt you submitted
+- the latest model output line
 
 ## Setup
 
-1. Create a Telegram bot with BotFather.
-2. Get your bot token.
-3. Start a chat with the bot.
-4. Find your chat ID.
-5. Install `uv` if you do not already have it.
-6. Create the local virtual environment and install the project:
+From the project root:
 
 ```bash
 uv sync
+cp .env.example .env
 ```
 
-7. Copy `.env.example` to `.env` or export these environment variables:
+Put your Telegram credentials in `.env`:
 
 ```bash
-export TELEGRAM_BOT_TOKEN=123456789:replace_me
-export TELEGRAM_CHAT_ID=123456789
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
 ```
 
-8. Send yourself a test notification before debugging the agent integration:
+Send a test message:
 
 ```bash
 uv run telegram-agent-notify --test-telegram
 ```
 
-## Usage
+## Main Usage
 
-Run any terminal command through the notifier:
-
-```bash
-uv run telegram-agent-notify --name codex -- codex
-```
-
-For a longer command:
+If you normally run Codex like this:
 
 ```bash
-uv run telegram-agent-notify --name agent -- your-agent-command --arg1 --arg2
+codex --dangerously-bypass-approvals-and-sandbox
 ```
 
-If your agent is normally started through a shell alias or shell pipeline, use
-the helper script:
+run it through the wrapper like this:
 
 ```bash
-./bin/agent-notify codex
-./bin/agent-notify "codex --help"
+./bin/agent-notify "codex --dangerously-bypass-approvals-and-sandbox"
 ```
-
-When the helper sees a Codex command, it automatically enables `Ready.` watching.
-The helper itself uses `uv run --project ...`, so it works from other directories
-without relying on `PYTHONPATH`.
 
 ## Use From Any Directory
 
-You can run the notifier from other projects by calling the helper with its
-absolute path:
+You can run the notifier from any project directory by calling the helper with
+its absolute path:
 
 ```bash
 /Users/johncosnett/PycharmProjects/telegram-agent-notify/bin/agent-notify "codex --dangerously-bypass-approvals-and-sandbox"
 ```
 
-This starts Codex in your current working directory, so it still operates on
-whatever project you are currently inside. The helper resolves its own repo and
-uses that project's `uv` environment.
+That starts Codex in your current working directory, not in the notifier repo.
 
-You can also call the installed CLI directly through `uv` from any directory:
-
-```bash
-uv run --project /Users/johncosnett/PycharmProjects/telegram-agent-notify telegram-agent-notify --watch-ready --name codex --shell -- "codex --dangerously-bypass-approvals-and-sandbox"
-```
-
-If you want a shorter command, add an alias to your `~/.zshrc`:
+If you want a shorter command, add this to `~/.zshrc`:
 
 ```bash
 alias codex-notify='/Users/johncosnett/PycharmProjects/telegram-agent-notify/bin/agent-notify'
@@ -100,59 +80,28 @@ And use:
 codex-notify "codex --dangerously-bypass-approvals-and-sandbox"
 ```
 
-## Codex Example
-
-If you run Codex as follows:
-
-```bash
-codex --dangerously-bypass-approvals-and-sandbox
-```
-
-then your new shell command should be:
-
-```bash
-./bin/agent-notify "codex --dangerously-bypass-approvals-and-sandbox"
-```
+## Direct CLI
 
 You can also run the installed CLI directly:
 
 ```bash
-uv run telegram-agent-notify --watch-ready --name codex -- codex --dangerously-bypass-approvals-and-sandbox
+uv run --project /Users/johncosnett/PycharmProjects/telegram-agent-notify telegram-agent-notify --watch-ready --name codex --shell -- "codex --dangerously-bypass-approvals-and-sandbox"
 ```
 
-## Claude Code Example
-
-If you run Claude Code as follows:
-
-```bash
-claude --dangerously-skip-permissions
-```
-
-then your new shell command should be:
-
-```bash
-./bin/agent-notify "claude --dangerously-skip-permissions"
-```
-
-You can also run the installed CLI directly:
-
-```bash
-uv run telegram-agent-notify --name claude -- claude --dangerously-skip-permissions
-```
-
-## Message Example
+## Example Notification
 
 ```text
 codex is ready for the next task
-elapsed: 00:03:12
+elapsed: 00:00:07
 command: codex --dangerously-bypass-approvals-and-sandbox
 host: my-laptop
+prompt: please sleep for 5seconds and then give me a quote
+latest output: “Do what you can, with what you have, where you are.” — Theodore Roosevelt
 ```
 
 ## Notes
 
-- Telegram config is required before the wrapper starts the agent.
-- Run `uv sync` once before using the helper or direct CLI.
-- Codex notifications are triggered when the wrapper sees reliable completion output after you submit a prompt.
-- Other commands still notify on process exit.
-- The command's stdout and stderr still stream in your terminal as normal.
+- This project is focused on OpenAI Codex.
+- Run `uv sync` once before first use.
+- The helper script uses `uv run --project ...` under the hood.
+- Telegram config must be present before the wrapper starts Codex.
